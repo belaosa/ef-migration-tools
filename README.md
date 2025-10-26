@@ -48,14 +48,25 @@ python ef_migrate_and_script.py
 
 ### Create New Migration
 
+Creates a new migration **and automatically generates SQL script** from the last two migrations:
+
 ```bash
 python ef_migrate_and_script.py --create MigrationName
+```
+
+To create a migration **without** generating the SQL script:
+
+```bash
+python ef_migrate_and_script.py --create MigrationName --no-script
 ```
 
 Example:
 ```bash
 python ef_migrate_and_script.py --create AddUserEmailColumn
 ```
+This will:
+1. Create the migration `AddUserEmailColumn`
+2. Generate SQL script from second-to-last migration to the new one
 
 ## Examples
 
@@ -64,11 +75,19 @@ python ef_migrate_and_script.py --create AddUserEmailColumn
 python ef_migrate_and_script.py
 ```
 
-**Create migration on branch `OS-1234-add-user-email`:**
+**Create migration and generate SQL (default behavior):**
 ```bash
 python ef_migrate_and_script.py --create AddUserEmailColumn
 ```
-Output: Creates new migration with your naming
+Output:
+- Creates new migration `AddUserEmailColumn`
+- Generates SQL file (e.g., `OS-1234.sql` if on branch `OS-1234-add-user-email`)
+
+**Create migration without SQL generation:**
+```bash
+python ef_migrate_and_script.py --create AddUserEmailColumn --no-script
+```
+Output: Only creates the migration, no SQL file
 
 **Generate SQL for specific migrations:**
 ```bash

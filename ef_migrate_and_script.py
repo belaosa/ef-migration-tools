@@ -7,8 +7,9 @@ Modes:
    - Automatically detects from/to migrations
    - Output filename: OS-#### from branch/migration name, or timestamp
 
-2. Create mode (--create): Add a new migration
+2. Create mode (--create): Add a new migration and generate SQL script
    - Usage: --create MigrationName
+   - Use --no-script to skip SQL generation after creating migration
 
 Requirements:
 - Python 3.10+
@@ -137,7 +138,8 @@ def main():
         description="EF Core migration script generator. Reads config from .env file.",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--create", metavar="NAME", help="Create a new migration")
+    ap.add_argument("--create", metavar="NAME", help="Create a new migration (also generates SQL by default)")
+    ap.add_argument("--no-script", action="store_true", help="Skip SQL script generation after creating migration")
     ap.add_argument("--from", dest="from_mig", help="Override 'from' migration id")
     ap.add_argument("--to", dest="to_mig", help="Override 'to' migration id")
     ap.add_argument("--ticket", help="Override ticket number for output filename")
@@ -179,10 +181,18 @@ def main():
 
         run_stream(ef_cmd(ef_mode, cmd), repo)
         print(f"\n✅ Migration created: {migration_name}")
-        return
+
+        if args.no_script:
+            print("Skipping SQL script generation (--no-script flag)")
+            return
+
+        print("\n=== Generating SQL Script for New Migration ===")
 
     files = list_migration_files(migrations_dir)
     if len(files) < 2 and not (args.from_mig and args.to_mig):
+        if args.create:
+            print("⚠️  Only one migration exists. Cannot generate SQL script.")
+            return
         raise RuntimeError(f"Need at least two migrations in {migrations_dir}")
 
     if args.from_mig and args.to_mig:
