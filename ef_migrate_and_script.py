@@ -1,20 +1,10 @@
 #!/usr/bin/env python3
 """
-EF Core Migration Script Generator
-
-Modes:
-1. Default: Generate SQL script from last two migrations
-   - Automatically detects from/to migrations
-   - Output filename: OS-#### from branch/migration name, or timestamp
-
-2. Create mode (--create): Add a new migration and generate SQL script
-   - Usage: --create MigrationName
-   - Use --no-script to skip SQL generation after creating migration
-
-Requirements:
-- Python 3.10+
-- dotnet-ef (global or local tool)
-- .env file with project configuration
+Enhanced EF Core Migration Script
+---------------------------------
+- Dynamically choose between multiple environment files (e.g., wms.env, uc.env)
+- Remembers last choice via .last_env
+- Same functionality as before (migration creation and SQL generation)
 """
 
 import argparse
@@ -24,18 +14,21 @@ import sys
 from pathlib import Path
 from typing import List, Tuple
 
+# Regex definitions
 OS_TICKET_RE = re.compile(r"\bOS[-_](\d+)\b", re.IGNORECASE)
 MIGRATION_FILE_RE = re.compile(r"^(?P<ts>\d{14})_(?P<name>.+)\.cs$", re.IGNORECASE)
 
+# ---------- Utility Functions ----------
+
+def color(text, color_code): return f"\033[{color_code}m{text}\033[0m"
+def green(text): return color(text, "92")
+def yellow(text): return color(text, "93")
+def red(text): return color(text, "91")
+def cyan(text): return color(text, "96")
 
 def load_env(env_path: Path) -> dict:
-    """Load environment variables from .env file."""
     if not env_path.exists():
-        raise FileNotFoundError(
-            f".env file not found at {env_path}\n"
-            f"Copy .env.example to .env and configure your project paths."
-        )
-
+        raise FileNotFoundError(f".env file not found at {env_path}")
     env_vars = {}
     with open(env_path, 'r', encoding='utf-8') as f:
         for line in f:
@@ -46,27 +39,49 @@ def load_env(env_path: Path) -> dict:
     return env_vars
 
 
+def choose_env_file(script_dir: Path) -> Path:
+    """Prompt user to select which env file to use (e.g., wms.env, uc.env)."""
+    env_files = list(script_dir.glob("*.env"))
+    if not env_files:
+        raise RuntimeError("No .env files found in the current directory!")
+
+    last_env_file = script_dir / ".last_env"
+    last_used = last_env_file.read_text().strip() if last_env_file.exists() else None
+
+    print(cyan("\n🔧 Available environment files:"))
+    for idx, f in enumerate(env_files, start=1):
+        print(f"  {idx}. {f.name}" + ("  ✅ (last used)" if f.name == last_used else ""))
+
+    choice = input(yellow(f"\nSelect environment [1-{len(env_files)}] or press Enter for last ({last_used}): ")).strip()
+
+    if choice == "" and last_used:
+        chosen = script_dir / last_used
+    else:
+        try:
+            chosen = env_files[int(choice) - 1]
+        except Exception:
+            raise RuntimeError("Invalid selection.")
+
+    # Save for next run
+    last_env_file.write_text(chosen.name)
+    print(green(f"\n✅ Using environment file: {chosen.name}"))
+    return chosen
+
+
 def run_stream(cmd: List[str], cwd: Path) -> str:
-    """Execute command and stream output to console."""
-    print(f"\n> {' '.join(cmd)}\n   (cwd: {cwd})")
-    proc = subprocess.Popen(
-        cmd, cwd=str(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True
-    )
+    print(cyan(f"\n> {' '.join(cmd)}\n   (cwd: {cwd})"))
+    proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     out = []
     for line in proc.stdout:
         print(line.rstrip())
         out.append(line)
     ret = proc.wait()
     if ret != 0:
-        raise RuntimeError(f"Command failed (exit {ret}): {' '.join(cmd)}")
+        raise RuntimeError(red(f"Command failed (exit {ret}): {' '.join(cmd)}"))
     return "".join(out)
 
 
 def try_output(cmd: List[str], cwd: Path) -> str:
-    """Execute command and return output, empty string on error."""
     try:
         return subprocess.check_output(cmd, cwd=str(cwd), text=True).strip()
     except Exception:
@@ -74,29 +89,21 @@ def try_output(cmd: List[str], cwd: Path) -> str:
 
 
 def resolve_ef_mode(repo: Path) -> str:
-    """Detect if dotnet-ef is installed globally or locally."""
     if try_output(["dotnet", "ef", "--version"], repo):
         return "global"
     if try_output(["dotnet", "tool", "run", "dotnet-ef", "--version"], repo):
         return "local"
-    raise RuntimeError(
-        "dotnet-ef not found.\n"
-        "Install globally:  dotnet tool install -g dotnet-ef\n"
-        "or as local tool:  dotnet new tool-manifest && dotnet tool install dotnet-ef"
-    )
+    raise RuntimeError(red("dotnet-ef not found. Install it globally or locally."))
 
 
 def ef_cmd(mode: str, args: List[str]) -> List[str]:
-    """Build dotnet-ef command based on installation mode."""
     return (["dotnet", "ef"] if mode == "global" else ["dotnet", "tool", "run", "dotnet-ef"]) + args
 
 
 def list_migration_files(migrations_dir: Path) -> List[Tuple[str, str]]:
-    """Scan migrations directory and return sorted list of (timestamp, name) tuples."""
     if not migrations_dir.exists():
         raise FileNotFoundError(f"Migrations dir not found: {migrations_dir}")
-
-    items: List[Tuple[str, str]] = []
+    items = []
     for p in migrations_dir.glob("*.cs"):
         n = p.name
         if n.endswith("Snapshot.cs") or n.endswith(".Designer.cs"):
@@ -109,48 +116,40 @@ def list_migration_files(migrations_dir: Path) -> List[Tuple[str, str]]:
 
 
 def git_branch(repo: Path) -> str:
-    """Get current git branch name."""
-    out = try_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], repo)
-    return out or ""
+    return try_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], repo)
 
 
 def extract_ticket(branch: str, latest_name: str, latest_ts: str) -> str:
-    """
-    Extract OS ticket number for output filename.
-    Priority: branch name > migration name > timestamp
-    """
     m = OS_TICKET_RE.search(branch)
     if m:
         return m.group(1)
-
     m2 = OS_TICKET_RE.search(latest_name)
     if m2:
         return m2.group(1)
-
     return latest_ts
 
+# ---------- Main ----------
 
 def main():
     script_dir = Path(__file__).parent
-    env_file = script_dir / ".env"
 
-    ap = argparse.ArgumentParser(
-        description="EF Core migration script generator. Reads config from .env file.",
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    ap.add_argument("--create", metavar="NAME", help="Create a new migration (also generates SQL by default)")
-    ap.add_argument("--no-script", action="store_true", help="Skip SQL script generation after creating migration")
-    ap.add_argument("--from", dest="from_mig", help="Override 'from' migration id")
-    ap.add_argument("--to", dest="to_mig", help="Override 'to' migration id")
-    ap.add_argument("--ticket", help="Override ticket number for output filename")
-    ap.add_argument("--context", help="DbContext name (if multiple contexts exist)")
+    # Ask user which env file to load
+    chosen_env = choose_env_file(script_dir)
+    env_vars = load_env(chosen_env)
+
+    # CLI args
+    ap = argparse.ArgumentParser(description="EF Core Migration Script Generator (multi-env)")
+    ap.add_argument("--create", metavar="NAME", help="Create new migration")
+    ap.add_argument("--no-script", action="store_true", help="Skip SQL generation")
+    ap.add_argument("--from", dest="from_mig", help="Override 'from' migration")
+    ap.add_argument("--to", dest="to_mig", help="Override 'to' migration")
+    ap.add_argument("--ticket", help="Override ticket number")
+    ap.add_argument("--context", help="Specify DbContext")
     ap.add_argument("--idempotent", action="store_true", help="Generate idempotent script")
-    ap.add_argument("--skip-build", action="store_true", help="Skip dotnet build step")
-    ap.add_argument("--env", default=str(env_file), help="Path to .env file")
+    ap.add_argument("--skip-build", action="store_true", help="Skip build step")
     args = ap.parse_args()
 
-    env_vars = load_env(Path(args.env))
-
+    # Resolve paths
     repo = Path(env_vars["REPO_PATH"]).resolve()
     project_path = repo / env_vars["PROJECT_NAME"]
     startup_path = repo / env_vars["STARTUP_PROJECT"]
@@ -160,83 +159,46 @@ def main():
 
     ef_mode = resolve_ef_mode(repo)
 
+    # Create migration if requested
     if args.create:
         migration_name = args.create
-        print("\n=== Creating New Migration ===")
-        print(f"Repo:            {repo}")
-        print(f"Project:         {project_path}")
-        print(f"Startup:         {startup_path}")
-        print(f"Migration name:  {migration_name}")
-        if context:
-            print(f"Context:         {context}")
-        print("==============================")
+        print(yellow("\n=== Creating New Migration ==="))
+        print(f"Repo: {repo}\nProject: {project_path}\nStartup: {startup_path}\nMigration: {migration_name}")
+        if context: print(f"Context: {context}")
+        print("=" * 40)
 
-        cmd = [
-            "migrations", "add", migration_name,
-            "--project", str(project_path),
-            "--startup-project", str(startup_path)
-        ]
-        if context:
-            cmd += ["--context", context]
-
+        cmd = ["migrations", "add", migration_name, "--project", str(project_path), "--startup-project", str(startup_path)]
+        if context: cmd += ["--context", context]
         run_stream(ef_cmd(ef_mode, cmd), repo)
-        print(f"\n✅ Migration created: {migration_name}")
-
+        print(green(f"\n✅ Migration created: {migration_name}"))
         if args.no_script:
-            print("Skipping SQL script generation (--no-script flag)")
+            print(yellow("Skipping SQL generation (--no-script)"))
             return
 
-        print("\n=== Generating SQL Script for New Migration ===")
-
+    # Generate SQL script
     files = list_migration_files(migrations_dir)
     if len(files) < 2 and not (args.from_mig and args.to_mig):
-        if args.create:
-            print("⚠️  Only one migration exists. Cannot generate SQL script.")
-            return
-        raise RuntimeError(f"Need at least two migrations in {migrations_dir}")
+        raise RuntimeError("Need at least two migrations to generate script")
 
-    if args.from_mig and args.to_mig:
-        from_id = args.from_mig
-        to_id = args.to_mig
-        latest_ts, latest_name = files[-1] if files else ("latest", "latest")
-    else:
-        ts_prev, name_prev = files[-2]
-        ts_last, name_last = files[-1]
-        from_id = f"{ts_prev}_{name_prev}"
-        to_id = f"{ts_last}_{name_last}"
-        latest_ts, latest_name = ts_last, name_last
+    ts_prev, name_prev = files[-2]
+    ts_last, name_last = files[-1]
+    from_id = args.from_mig or f"{ts_prev}_{name_prev}"
+    to_id = args.to_mig or f"{ts_last}_{name_last}"
 
-    ticket = args.ticket or extract_ticket(git_branch(repo), latest_name, latest_ts)
+    ticket = args.ticket or extract_ticket(git_branch(repo), name_last, ts_last)
     output_sql = scripts_dir / f"{ticket}.sql"
     scripts_dir.mkdir(parents=True, exist_ok=True)
 
-    print("\n=== Generating SQL Script ===")
-    print(f"Repo:            {repo}")
-    print(f"Project:         {project_path}")
-    print(f"Startup:         {startup_path}")
-    print(f"Migrations dir:  {migrations_dir}")
-    print(f"Scripts dir:     {scripts_dir}")
-    print(f"From migration:  {from_id}")
-    print(f"To migration:    {to_id}")
-    print(f"Ticket:          {ticket}")
-    print(f"Output SQL:      {output_sql}")
-    if context:
-        print(f"Context:         {context}")
-    print("=============================")
+    print(yellow("\n=== Generating SQL Script ==="))
+    print(f"From: {from_id}\nTo: {to_id}\nTicket: {ticket}\nOutput: {output_sql}")
+    print("=" * 40)
 
     if not args.skip_build:
         run_stream(["dotnet", "build", str(startup_path)], repo)
 
-    cmd = [
-        "migrations", "script", from_id, to_id,
-        "--project", str(project_path),
-        "--startup-project", str(startup_path),
-        "--output", str(output_sql)
-    ]
-    if context:
-        cmd += ["--context", context]
-    if args.idempotent:
-        cmd += ["--idempotent"]
+    cmd = ["migrations", "script", from_id, to_id, "--project", str(project_path), "--startup-project", str(startup_path), "--output", str(output_sql)]
+    if context: cmd += ["--context", context]
+    if args.idempotent: cmd += ["--idempotent"]
 
     try:
         run_stream(ef_cmd(ef_mode, cmd), repo)
@@ -244,12 +206,12 @@ def main():
         cmd.append("--no-build")
         run_stream(ef_cmd(ef_mode, cmd), repo)
 
-    print(f"\n✅ SQL script generated: {output_sql}")
+    print(green(f"\n✅ SQL script generated: {output_sql}"))
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"\n❌ ERROR: {e}")
+        print(red(f"\n❌ ERROR: {e}"))
         sys.exit(1)
