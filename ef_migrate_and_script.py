@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""
+r"""
 EF Core Migration Script Generator
 
 Modes:
@@ -72,6 +72,20 @@ def try_output(cmd: List[str], cwd: Path) -> str:
     except Exception:
         return ""
 
+def resolve_path(base: Path, raw: str) -> Path:
+    """
+    Resolve a path from .env:
+    - If raw is an absolute path → return it as Path.
+    - If raw is relative → resolve it against the base path.
+    """
+    p = Path(raw)
+
+    # Case 1: absolute path (C:\..., D:\..., /home/..., etc.)
+    if p.is_absolute():
+        return p.resolve()
+
+    # Case 2: relative path → attach to repo base
+    return (base / p).resolve()
 
 def resolve_ef_mode(repo: Path) -> str:
     """Detect if dotnet-ef is installed globally or locally."""
@@ -107,6 +121,11 @@ def list_migration_files(migrations_dir: Path) -> List[Tuple[str, str]]:
     items.sort(key=lambda x: x[0])
     return items
 
+def add_context_arg(cmd: List[str], context: str | None):
+    """Append DbContext argument if provided."""
+    if context:
+        cmd += ["--context", context]
+
 
 def git_branch(repo: Path) -> str:
     """Get current git branch name."""
@@ -140,6 +159,7 @@ def main():
     )
     ap.add_argument("--create", metavar="NAME", help="Create a new migration (also generates SQL by default)")
     ap.add_argument("--no-script", action="store_true", help="Skip SQL script generation after creating migration")
+    ap.add_argument("--revert", action="store_true", help="Generate SQL script to revert (rollback) the last migration")
     ap.add_argument("--from", dest="from_mig", help="Override 'from' migration id")
     ap.add_argument("--to", dest="to_mig", help="Override 'to' migration id")
     ap.add_argument("--ticket", help="Override ticket number for output filename")
@@ -152,10 +172,10 @@ def main():
     env_vars = load_env(Path(args.env))
 
     repo = Path(env_vars["REPO_PATH"]).resolve()
-    project_path = repo / env_vars["PROJECT_NAME"]
-    startup_path = repo / env_vars["STARTUP_PROJECT"]
-    migrations_dir = repo / env_vars["MIGRATIONS_DIR"]
-    scripts_dir = repo / env_vars["SCRIPTS_DIR"]
+    project_path = resolve_path(repo, env_vars["PROJECT_NAME"])
+    startup_path = resolve_path(repo, env_vars["STARTUP_PROJECT"])
+    migrations_dir = resolve_path(repo, env_vars["MIGRATIONS_DIR"])
+    scripts_dir = resolve_path(repo, env_vars["SCRIPTS_DIR"])
     context = args.context or env_vars.get("DBCONTEXT_NAME")
 
     ef_mode = resolve_ef_mode(repo)
@@ -176,8 +196,7 @@ def main():
             "--project", str(project_path),
             "--startup-project", str(startup_path)
         ]
-        if context:
-            cmd += ["--context", context]
+        add_context_arg(cmd, context)
 
         run_stream(ef_cmd(ef_mode, cmd), repo)
         print(f"\n✅ Migration created: {migration_name}")
@@ -206,8 +225,15 @@ def main():
         to_id = f"{ts_last}_{name_last}"
         latest_ts, latest_name = ts_last, name_last
 
+    if args.revert:
+        print("\n=== REVERT MODE ===")
+        print("Generating reverse SQL (rollback) script")
+        print(f"Swapping FROM ({from_id}) and TO ({to_id})\n")
+        from_id, to_id = to_id, from_id
+
     ticket = args.ticket or extract_ticket(git_branch(repo), latest_name, latest_ts)
-    output_sql = scripts_dir / f"{ticket}.sql"
+    suffix = "_revert" if args.revert else ""
+    output_sql = scripts_dir / f"{ticket}{suffix}.sql"
     scripts_dir.mkdir(parents=True, exist_ok=True)
 
     print("\n=== Generating SQL Script ===")
@@ -233,8 +259,8 @@ def main():
         "--startup-project", str(startup_path),
         "--output", str(output_sql)
     ]
-    if context:
-        cmd += ["--context", context]
+    add_context_arg(cmd, context)
+
     if args.idempotent:
         cmd += ["--idempotent"]
 
